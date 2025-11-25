@@ -1,5 +1,6 @@
 const express = require('express');
-const puppeteer = require('puppeteer');
+const puppeteer = require('puppeteer-core');
+const chromium = require('@sparticuz/chromium');
 const path = require('path');
 
 const app = express();
@@ -88,23 +89,13 @@ async function performRealSearch(config, zipCode = '') {
     try {
         // Launch browser with production-ready configuration
         const launchOptions = {
-            headless: 'new',
-            args: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-gpu'
-            ]
+            headless: chromium.headless,
+            args: chromium.args,
+            defaultViewport: chromium.defaultViewport,
+            executablePath: await chromium.executablePath()
         };
 
-        // On production (Render.com), use environment-based path detection
-        if (process.env.NODE_ENV === 'production') {
-            // Puppeteer installs Chrome here by default on Render
-            launchOptions.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || 
-                '/opt/render/project/.render/chrome/opt/google/chrome/chrome';
-        }
-
-        console.log('Launching browser with options:', launchOptions);
+        console.log('Launching browser with Chromium for serverless...');
         browser = await puppeteer.launch(launchOptions);
         
         const page = await browser.newPage();
