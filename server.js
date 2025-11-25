@@ -97,11 +97,14 @@ async function performRealSearch(config, zipCode = '') {
             ]
         };
 
-        // On Render.com (production), specify the Chrome executable path
+        // On production (Render.com), use environment-based path detection
         if (process.env.NODE_ENV === 'production') {
-            launchOptions.executablePath = '/opt/render/.cache/puppeteer/chrome/linux-133.0.6943.126/chrome-linux64/chrome';
+            // Puppeteer installs Chrome here by default on Render
+            launchOptions.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || 
+                '/opt/render/project/.render/chrome/opt/google/chrome/chrome';
         }
 
+        console.log('Launching browser with options:', launchOptions);
         browser = await puppeteer.launch(launchOptions);
         
         const page = await browser.newPage();
