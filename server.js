@@ -100,18 +100,45 @@ async function performRealSearch(config, zipCode = '') {
         
         const page = await browser.newPage();
         
+        // Set longer timeout for navigation (60 seconds)
+        page.setDefaultNavigationTimeout(60000);
+        page.setDefaultTimeout(60000);
+        
         // Set viewport
         await page.setViewport({ width: 1920, height: 1080 });
         
-        // Navigate to the Find a Doctor page
+        // Navigate to the Find a Doctor page with retry logic
         console.log('Navigating to UNC Health Find a Doctor...');
-        await page.goto('https://www.unchealth.org/care-services/doctors', {
-            waitUntil: 'networkidle2',
-            timeout: 30000
-        });
         
-        // Wait for the page to load
-        await page.waitForTimeout(3000);
+        let navigationSuccess = false;
+        let lastError = null;
+        
+        for (let attempt = 1; attempt <= 3; attempt++) {
+            try {
+                console.log(`Navigation attempt ${attempt}/3...`);
+                await page.goto('https://www.unchealth.org/care-services/doctors', {
+                    waitUntil: 'domcontentloaded', // Changed from networkidle2 for faster load
+                    timeout: 60000
+                });
+                navigationSuccess = true;
+                console.log('Navigation successful!');
+                break;
+            } catch (error) {
+                lastError = error;
+                console.log(`Attempt ${attempt} failed:`, error.message);
+                if (attempt < 3) {
+                    console.log('Retrying in 2 seconds...');
+                    await page.waitForTimeout(2000);
+                }
+            }
+        }
+        
+        if (!navigationSuccess) {
+            throw new Error(`Failed to navigate after 3 attempts: ${lastError.message}`);
+        }
+        
+        // Wait for page to load
+        await page.waitForTimeout(5000);
         
         // Try to find and fill in the specialty search field
         console.log('Looking for search fields...');
@@ -220,42 +247,119 @@ async function performRealSearch(config, zipCode = '') {
             await page.waitForTimeout(5000);
         }
         
-        // Extract provider results from the page
-        console.log('Extracting provider information...');
-        const providers = await page.evaluate(() => {
-            const results = [];
+        // Collect providers from multiple pages (limit to 2 pages)
+        let allProviders = [];
+        const maxPages = 2;
+        
+        for (let pageNum = 1; pageNum <= maxPages; pageNum++) {
+            console.log(`Extracting providers from page ${pageNum}...`);
             
-            // Try to find provider cards - these selectors may need adjustment
-            const providerElements = document.querySelectorAll('[class*="provider"], [class*="doctor"], [class*="physician"], [data-testid*="provider"]');
-            
-            providerElements.forEach(element => {
-                // Try to extract name
-                const nameElement = element.querySelector('[class*="name"], h2, h3, h4, a[href*="provider"]');
-                const name = nameElement ? nameElement.textContent.trim() : '';
+            // Extract provider results from current page
+            const providers = await page.evaluate(() => {
+                const results = [];
                 
-                // Try to extract specialty
-                const specialtyElement = element.querySelector('[class*="specialty"], [class*="title"]');
-                const specialty = specialtyElement ? specialtyElement.textContent.trim() : '';
+                // Try to find provider cards - these selectors may need adjustment
+                const providerElements = document.querySelectorAll('[class*="provider"], [class*="doctor"], [class*="physician"], [data-testid*="provider"]');
                 
-                // Get all text content for analysis
-                const fullText = element.textContent.toLowerCase();
+                console.log(`Found ${providerElements.length} potential provider elements`);
                 
-                if (name) {
-                    results.push({
-                        name,
-                        specialty,
-                        fullText
-                    });
-                }
+                providerElements.forEach(element => {
+                    // Try to extract name
+                    const nameElement = element.querySelector('[class*="name"], h2, h3, h4, a[href*="provider"]');
+                    const name = nameElement ? nameElement.textContent.trim() : '';
+                    
+                    // Try to extract specialty
+                    const specialtyElement = element.querySelector('[class*="specialty"], [class*="title"]');
+                    const specialty = specialtyElement ? specialtyElement.textContent.trim() : '';
+                    
+                    // Get all text content for analysis
+                    const fullText = element.textContent.toLowerCase();
+                    
+                    if (name) {
+                        results.push({
+                            name,
+                            specialty,
+                            fullText
+                        });
+                    }
+                });
+                
+                return results;
             });
             
-            return results;
-        });
+            console.log(`Found ${providers.length} providers on page ${pageNum}`);
+            allProviders = allProviders.concat(providers);
+            
+            // If this is not the last page, try to navigate to next page
+            if (pageNum < maxPages) {
+                console.log(`Looking for "Next" button to go to page ${pageNum + 1}...`);
+                
+                // Try to find and click the next/pagination button
+                const nextButtonSelectors = [
+                    'button:has-text("Next")',
+                    'a:has-text("Next")',
+                    'button[aria-label*="next" i]',
+                    'a[aria-label*="next" i]',
+                    '.pagination button:last-child',
+                    '[class*="next"]',
+                    '[class*="pagination"] button:not([disabled]):last-child'
+                ];
+                
+                let nextButton = null;
+                for (const selector of nextButtonSelectors) {
+                    try {
+                        nextButton = await page.$(selector);
+                        if (nextButton) {
+                            // Check if button is disabled
+                            const isDisabled = await page.evaluate(btn => {
+                                return btn.disabled || btn.classList.contains('disabled') || 
+                                       btn.getAttribute('aria-disabled') === 'true';
+                            }, nextButton);
+                            
+                            if (!isDisabled) {
+                                console.log(`Found next button with selector: ${selector}`);
+                                break;
+                            } else {
+                                nextButton = null; // Button is disabled, no more pages
+                            }
+                        }
+                    } catch (e) {
+                        continue;
+                    }
+                }
+                
+                if (nextButton) {
+                    console.log(`Clicking next button to go to page ${pageNum + 1}...`);
+                    await nextButton.click();
+                    await page.waitForTimeout(3000); // Wait for next page to load
+                } else {
+                    console.log('No more pages available or next button not found');
+                    break; // Exit loop if no next button found
+                }
+            }
+        }
         
-        console.log(`Found ${providers.length} providers`);
+        console.log(`Total providers found across ${Math.min(maxPages, pageNum)} pages: ${allProviders.length}`);
+        
+        // If no providers found, return helpful error
+        if (allProviders.length === 0) {
+            console.log('WARNING: No providers found. The page structure may have changed.');
+            console.log('Taking screenshot for debugging...');
+            await page.screenshot({ path: 'debug-no-results.png', fullPage: false });
+            
+            // Return a helpful message instead of empty results
+            return {
+                total: 0,
+                relevant: 0,
+                irrelevant: 0,
+                accuracy: 0,
+                providers: [],
+                warning: 'No providers found. This could mean: (1) The search returned no results, (2) The page structure has changed, or (3) The page is still loading. Check debug-no-results.png for details.'
+            };
+        }
         
         // Analyze results for relevancy
-        const analysisResult = analyzeProviders(providers, config);
+        const analysisResult = analyzeProviders(allProviders, config);
         
         // Take a screenshot for debugging
         await page.screenshot({ path: 'debug-screenshot.png', fullPage: true });
@@ -319,7 +423,8 @@ function analyzeProviders(providers, config) {
         relevant: relevantCount,
         irrelevant: irrelevantCount,
         accuracy,
-        providers: analyzedProviders
+        providers: analyzedProviders,
+        pagesAnalyzed: Math.ceil(total / 10) || 1 // Estimate pages analyzed
     };
 }
 

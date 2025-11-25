@@ -612,12 +612,13 @@
             if (accuracy < 60) accuracyClass = 'danger';
 
             let locationInfo = data.zipCode ? ` • Location: ${data.zipCode}` : '';
+            let pagesInfo = results.pagesAnalyzed ? ` • Analyzed ${results.pagesAnalyzed} page(s)` : '';
 
             let html = `
                 <div class="results-header">
                     <h2>${data.specialty} Search Results</h2>
                     <div class="meta">
-                        ${data.description}${locationInfo} • Tested on ${new Date(data.timestamp).toLocaleString()}
+                        ${data.description}${locationInfo}${pagesInfo} • Tested on ${new Date(data.timestamp).toLocaleString()}
                     </div>
                 </div>
 
