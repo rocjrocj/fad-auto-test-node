@@ -82,11 +82,106 @@ app.post('/api/runTest', async (req, res) => {
     }
 });
 
+// Server-Sent Events endpoint for progress updates
+app.get('/api/runTest/progress/:sessionId', (req, res) => {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    
+    const sessionId = req.params.sessionId;
+    
+    // Store this response object for sending progress updates
+    if (!global.progressClients) {
+        global.progressClients = {};
+    }
+    global.progressClients[sessionId] = res;
+    
+    // Cleanup on disconnect
+    req.on('close', () => {
+        delete global.progressClients[sessionId];
+    });
+});
+
+// Helper function to send progress updates
+function sendProgress(sessionId, message, step, totalSteps) {
+    if (global.progressClients && global.progressClients[sessionId]) {
+        const data = JSON.stringify({ message, step, totalSteps });
+        global.progressClients[sessionId].write(`data: ${data}\n\n`);
+    }
+    console.log(`[${sessionId}] ${message}`);
+}
+
+// Updated API endpoint with session support
+app.post('/api/runTestWithProgress', async (req, res) => {
+    const sessionId = Date.now().toString();
+    
+    try {
+        const { specialty, customTerms, zipCode } = req.body;
+        
+        sendProgress(sessionId, 'Starting test...', 0, 10);
+        
+        // Find the specialty configuration
+        let testConfig = specialtyTests.find(test => test.name === specialty);
+        
+        // Handle custom specialty
+        if (specialty === 'Custom' && customTerms) {
+            const terms = customTerms.split(',').map(t => t.trim()).filter(t => t);
+            testConfig = {
+                name: 'Custom Search',
+                terms: terms,
+                description: 'Custom specialty search'
+            };
+        }
+        
+        if (!testConfig) {
+            return res.status(400).json({ error: 'Invalid specialty selected' });
+        }
+        
+        sendProgress(sessionId, 'Configuration validated', 1, 10);
+        
+        // Perform the actual search with progress tracking
+        const result = await performRealSearch(testConfig, zipCode, sessionId);
+        
+        sendProgress(sessionId, 'Test complete!', 10, 10);
+        
+        // Cleanup
+        if (global.progressClients && global.progressClients[sessionId]) {
+            global.progressClients[sessionId].end();
+            delete global.progressClients[sessionId];
+        }
+        
+        res.json({
+            success: true,
+            sessionId: sessionId,
+            specialty: testConfig.name,
+            description: testConfig.description,
+            zipCode: zipCode || '',
+            timestamp: new Date().toISOString(),
+            results: result
+        });
+        
+    } catch (error) {
+        console.error('Error running test:', error);
+        
+        if (global.progressClients && global.progressClients[sessionId]) {
+            sendProgress(sessionId, `Error: ${error.message}`, -1, 10);
+            global.progressClients[sessionId].end();
+            delete global.progressClients[sessionId];
+        }
+        
+        res.status(500).json({ 
+            error: 'Failed to run test: ' + error.message 
+        });
+    }
+});
+
 // Function to perform real search using Puppeteer
-async function performRealSearch(config, zipCode = '') {
+async function performRealSearch(config, zipCode = '', sessionId = null) {
     let browser = null;
     
     try {
+        sendProgress(sessionId, 'Launching headless browser...', 2, 10);
+        
         // Launch browser with production-ready configuration
         const launchOptions = {
             headless: chromium.headless,
@@ -98,6 +193,8 @@ async function performRealSearch(config, zipCode = '') {
         console.log('Launching browser with Chromium for serverless...');
         browser = await puppeteer.launch(launchOptions);
         
+        sendProgress(sessionId, 'Browser launched successfully', 3, 10);
+        
         const page = await browser.newPage();
         
         // Set longer timeout for navigation (60 seconds)
@@ -108,6 +205,7 @@ async function performRealSearch(config, zipCode = '') {
         await page.setViewport({ width: 1920, height: 1080 });
         
         // Navigate to the Find a Doctor page with retry logic
+        sendProgress(sessionId, 'Navigating to UNC Health Find a Doctor...', 4, 10);
         console.log('Navigating to UNC Health Find a Doctor...');
         
         let navigationSuccess = false;
@@ -115,6 +213,7 @@ async function performRealSearch(config, zipCode = '') {
         
         for (let attempt = 1; attempt <= 3; attempt++) {
             try {
+                sendProgress(sessionId, `Loading page (attempt ${attempt}/3)...`, 4, 10);
                 console.log(`Navigation attempt ${attempt}/3...`);
                 await page.goto('https://www.unchealth.org/care-services/doctors', {
                     waitUntil: 'domcontentloaded', // Changed from networkidle2 for faster load
@@ -122,6 +221,7 @@ async function performRealSearch(config, zipCode = '') {
                 });
                 navigationSuccess = true;
                 console.log('Navigation successful!');
+                sendProgress(sessionId, 'Page loaded successfully!', 5, 10);
                 break;
             } catch (error) {
                 lastError = error;
@@ -141,6 +241,7 @@ async function performRealSearch(config, zipCode = '') {
         await page.waitForTimeout(5000);
         
         // Try to find and fill in the specialty search field
+        sendProgress(sessionId, 'Looking for search form...', 5, 10);
         console.log('Looking for search fields...');
         
         // This selector may need adjustment based on the actual page structure
@@ -172,15 +273,19 @@ async function performRealSearch(config, zipCode = '') {
             throw new Error('Could not find specialty search field on the page');
         }
         
-        // Type the specialty
+        // Type the specialty - use page.evaluate for clicking to avoid errors
         const searchTerm = config.name;
+        sendProgress(sessionId, `Entering specialty: ${searchTerm}`, 6, 10);
         console.log(`Typing specialty: ${searchTerm}`);
-        await specialtyInput.click();
+        
+        // Focus the input field using evaluate instead of click
+        await page.evaluate(input => input.focus(), specialtyInput);
         await page.keyboard.type(searchTerm, { delay: 100 });
         await page.waitForTimeout(1000);
         
         // Fill in ZIP code if provided
         if (zipCode) {
+            sendProgress(sessionId, `Entering ZIP code: ${zipCode}`, 6, 10);
             console.log(`Looking for ZIP code field...`);
             const zipSelectors = [
                 'input[placeholder*="zip" i]',
@@ -206,13 +311,15 @@ async function performRealSearch(config, zipCode = '') {
             
             if (zipInput) {
                 console.log(`Typing ZIP code: ${zipCode}`);
-                await zipInput.click();
+                // Focus using evaluate instead of click
+                await page.evaluate(input => input.focus(), zipInput);
                 await page.keyboard.type(zipCode, { delay: 100 });
                 await page.waitForTimeout(1000);
             }
         }
         
         // Try to find and click the search button
+        sendProgress(sessionId, 'Submitting search...', 7, 10);
         console.log('Looking for search button...');
         const searchButtonSelectors = [
             'button[type="submit"]',
@@ -237,13 +344,16 @@ async function performRealSearch(config, zipCode = '') {
         }
         
         if (searchButton) {
-            await searchButton.click();
+            // Use page.evaluate to click to avoid "not clickable" error
+            await page.evaluate(btn => btn.click(), searchButton);
             console.log('Clicked search button, waiting for results...');
+            sendProgress(sessionId, 'Waiting for search results...', 7, 10);
             await page.waitForTimeout(5000); // Wait for results to load
         } else {
             // Try pressing Enter
             console.log('No search button found, pressing Enter...');
             await page.keyboard.press('Enter');
+            sendProgress(sessionId, 'Waiting for search results...', 7, 10);
             await page.waitForTimeout(5000);
         }
         
@@ -252,6 +362,7 @@ async function performRealSearch(config, zipCode = '') {
         const maxPages = 2;
         
         for (let pageNum = 1; pageNum <= maxPages; pageNum++) {
+            sendProgress(sessionId, `Extracting providers from page ${pageNum}...`, 7 + pageNum, 10);
             console.log(`Extracting providers from page ${pageNum}...`);
             
             // Extract provider results from current page
@@ -329,8 +440,10 @@ async function performRealSearch(config, zipCode = '') {
                 }
                 
                 if (nextButton) {
+                    sendProgress(sessionId, `Navigating to page ${pageNum + 1}...`, 7 + pageNum, 10);
                     console.log(`Clicking next button to go to page ${pageNum + 1}...`);
-                    await nextButton.click();
+                    // Use page.evaluate to avoid click errors
+                    await page.evaluate(btn => btn.click(), nextButton);
                     await page.waitForTimeout(3000); // Wait for next page to load
                 } else {
                     console.log('No more pages available or next button not found');
@@ -340,6 +453,7 @@ async function performRealSearch(config, zipCode = '') {
         }
         
         console.log(`Total providers found across ${Math.min(maxPages, pageNum)} pages: ${allProviders.length}`);
+        sendProgress(sessionId, `Found ${allProviders.length} providers total. Analyzing results...`, 9, 10);
         
         // If no providers found, return helpful error
         if (allProviders.length === 0) {

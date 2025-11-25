@@ -567,9 +567,30 @@
             resultsContent.classList.remove('active');
             loadingState.classList.add('active');
             runTestBtn.disabled = true;
+            
+            // Create session ID for this test
+            const sessionId = Date.now().toString();
+            
+            // Connect to progress stream
+            const eventSource = new EventSource(`/api/runTest/progress/${sessionId}`);
+            
+            eventSource.onmessage = function(event) {
+                const data = JSON.parse(event.data);
+                const loadingText = document.querySelector('.loading-text');
+                if (loadingText) {
+                    loadingText.innerHTML = `
+                        ${escapeHtml(data.message)}<br>
+                        <small>Step ${data.step} of ${data.totalSteps}</small>
+                    `;
+                }
+            };
+            
+            eventSource.onerror = function() {
+                eventSource.close();
+            };
 
             try {
-                const response = await fetch('/api/runTest', {
+                const response = await fetch('/api/runTestWithProgress', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json'
@@ -577,11 +598,14 @@
                     body: JSON.stringify({
                         specialty,
                         customTerms,
-                        zipCode
+                        zipCode,
+                        sessionId
                     })
                 });
 
                 const data = await response.json();
+                
+                eventSource.close();
 
                 if (data.error) {
                     throw new Error(data.error);
@@ -590,10 +614,11 @@
                 displayResults(data);
             } catch (error) {
                 console.error('Error:', error);
+                eventSource.close();
                 resultsContent.innerHTML = `
                     <div class="error-message">
                         <strong>Error running test:</strong><br>
-                        ${error.message}
+                        ${escapeHtml(error.message)}
                     </div>
                 `;
                 resultsContent.classList.add('active');
